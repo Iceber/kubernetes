@@ -239,6 +239,9 @@ var (
 	// object with zero length is encountered (should be impossible,
 	// but included for completeness).
 	ErrZeroLengthDeltasObject = errors.New("0 length Deltas object; can't get key")
+
+	// ErrIsDeltasObject is returned in a KeyError if object type is Deltas
+	ErrIsDeltasObject = errors.New("could not be Deltas object")
 )
 
 // Close the queue.
@@ -257,6 +260,17 @@ func (f *DeltaFIFO) KeyOf(obj interface{}) (string, error) {
 			return "", KeyError{obj, ErrZeroLengthDeltasObject}
 		}
 		obj = d.Newest().Object
+	}
+	if d, ok := obj.(DeletedFinalStateUnknown); ok {
+		return d.Key, nil
+	}
+	return f.keyFunc(obj)
+}
+
+// KeyOfNonDeltas same as KeyOf, but cannot detect the key of a Deltas object
+func (f *DeltaFIFO) KeyOfNonDeltas(obj interface{}) (string, error) {
+	if _, ok := obj.(Deltas); ok {
+		return "", KeyError{obj, ErrIsDeltasObject}
 	}
 	if d, ok := obj.(DeletedFinalStateUnknown); ok {
 		return d.Key, nil
@@ -295,7 +309,7 @@ func (f *DeltaFIFO) Update(obj interface{}) error {
 // method `f.knownObjects`, if not nil, provides (via GetByKey)
 // _additional_ objects that are considered to already exist.
 func (f *DeltaFIFO) Delete(obj interface{}) error {
-	id, err := f.KeyOf(obj)
+	id, err := f.KeyOfNonDeltas(obj)
 	if err != nil {
 		return KeyError{obj, err}
 	}
@@ -410,7 +424,7 @@ func isDeletionDup(a, b *Delta) *Delta {
 // queueActionLocked appends to the delta list for the object.
 // Caller must lock first.
 func (f *DeltaFIFO) queueActionLocked(actionType DeltaType, obj interface{}) error {
-	id, err := f.KeyOf(obj)
+	id, err := f.KeyOfNonDeltas(obj)
 	if err != nil {
 		return KeyError{obj, err}
 	}
@@ -575,11 +589,13 @@ func (f *DeltaFIFO) Replace(list []interface{}, resourceVersion string) error {
 
 	// Add Sync/Replaced action for each new item.
 	for _, item := range list {
-		key, err := f.KeyOf(item)
+		key, err := f.KeyOfNonDeltas(item)
 		if err != nil {
 			return KeyError{item, err}
 		}
 		keys.Insert(key)
+	}
+	for _, item := range list {
 		if err := f.queueActionLocked(action, item); err != nil {
 			return fmt.Errorf("couldn't enqueue object: %v", err)
 		}
@@ -679,7 +695,7 @@ func (f *DeltaFIFO) syncKeyLocked(key string) error {
 	// we ignore the Resync for it. This is to avoid the race, in which the resync
 	// comes with the previous value of object (since queueing an event for the object
 	// doesn't trigger changing the underlying store <knownObjects>.
-	id, err := f.KeyOf(obj)
+	id, err := f.KeyOfNonDeltas(obj)
 	if err != nil {
 		return KeyError{obj, err}
 	}
